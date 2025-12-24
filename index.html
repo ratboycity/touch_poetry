@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Surreal Poetry Cascade</title>
+<style>
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    background: #0a0a0a;
+    color: #ccc;
+    font-family: 'Inter', 'Courier New', monospace;
+    overflow: hidden;
+    height: 100vh;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+  }
+
+  #canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    cursor: grab;
+  }
+
+  #canvas:active {
+    cursor: grabbing;
+  }
+
+  .status {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    font-size: 32px;
+    color: #444;
+    z-index: 1000;
+    pointer-events: none;
+    text-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
+  }
+
+  .ws-status {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    font-size: 14px;
+    color: #666;
+    z-index: 1000;
+    pointer-events: none;
+    background: rgba(0,0,0,0.5);
+    padding: 5px 10px;
+    border-radius: 5px;
+  }
+
+  .input-form {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    padding: 15px;
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  #userInput {
+    width: 95%;
+    max-width: 600px;
+    padding: 14px;
+    font-size: 18px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid #555;
+    color: #eee;
+    border-radius: 12px;
+    font-family: 'Inter', 'Courier New', monospace;
+    outline: none;
+    transition: border-color .4s, background-color .4s, box-shadow .4s;
+    box-shadow: 0 0 8px rgba(0, 0, 0, 0.3);
+  }
+
+  #userInput:focus {
+    border-color: #999;
+    background-color: rgba(255, 255, 255, 0.15);
+    box-shadow: 0 0 15px rgba(100, 100, 255, 0.4);
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div class="status" id="status">●</div>
+<div class="ws-status" id="wsStatus">Disconnected</div>
+<div class="input-form">
+  <input type="text" id="userInput" placeholder="Type words and press Enter..." maxlength="100">
+</div>
+
+<script>
+// WebSocket connection
+let ws = null;
+let wsReconnectTimer = null;
+
+// CHANGE THIS TO YOUR LOCAL IP ADDRESS
+const WS_URL = "ws://localhost:9001"; // or "ws://192.168.x.x:9001"
+
+function connectWebSocket() {
+  try {
+    ws = new WebSocket(WS_URL);
+    
+    ws.onopen = () => {
+      console.log("WebSocket connected");
+      document.getElementById("wsStatus").textContent = "Connected";
+      document.getElementById("wsStatus").style.color = "#4a4";
+      clearTimeout(wsReconnectTimer);
+    };
+    
+    ws.onclose = () => {
+      console.log("WebSocket disconnected");
+      document.getElementById("wsStatus").textContent = "Disconnected";
+      document.getElementById("wsStatus").style.color = "#a44";
+      // Attempt reconnect after 2 seconds
+      wsReconnectTimer = setTimeout(connectWebSocket, 2000);
+    };
+    
+    ws.onerror = (error) => {
+      console.error("WebSocket error:", error);
+    };
+    
+    ws.onmessage = (event) => {
+      // Handle messages from TouchDesigner if needed
+      console.log("Received:", event.data);
+    };
+  } catch (error) {
+    console.error("Failed to connect:", error);
+    wsReconnectTimer = setTimeout(connectWebSocket, 2000);
+  }
+}
+
+function sendWebSocket(data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(data));
+  }
+}
+
+// Canvas visualization (simplified from original)
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let width, height;
+
+function resize() {
+  width = window.innerWidth;
+  height = window.innerHeight;
+  canvas.width = width;
+  canvas.height = height;
+}
+
+let isDragging = false;
+let currentPos = { x: 0, y: 0 };
+
+function handleStart(x, y) {
+  isDragging = true;
+  currentPos = { x, y };
+  
+  const normX = x / width;
+  const normY = y / height;
+  
+  sendWebSocket({
+    type: "touch",
+    touching: true,
+    x: normX,
+    y: normY,
+    rawX: x,
+    rawY: y
+  });
+}
+
+function handleMove(x, y) {
+  if (!isDragging) return;
+  currentPos = { x, y };
+  
+  const normX = x / width;
+  const normY = y / height;
+  
+  sendWebSocket({
+    type: "touch",
+    touching: true,
+    x: normX,
+    y: normY,
+    rawX: x,
+    rawY: y
+  });
+}
+
+function handleEnd() {
+  isDragging = false;
+  
+  sendWebSocket({
+    type: "touch",
+    touching: false,
+    x: currentPos.x / width,
+    y: currentPos.y / height
+  });
+}
+
+// Touch events
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  const touch = e.touches[0];
+  handleStart(touch.clientX, touch.clientY);
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  const touch = e.touches[0];
+  handleMove(touch.clientX, touch.clientY);
+}, { passive: false });
+
+canvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  handleEnd();
+}, { passive: false });
+
+// Mouse events
+canvas.addEventListener('mousedown', (e) => handleStart(e.clientX, e.clientY));
+canvas.addEventListener('mousemove', (e) => isDragging && handleMove(e.clientX, e.clientY));
+canvas.addEventListener('mouseup', () => handleEnd());
+canvas.addEventListener('mouseleave', () => handleEnd());
+
+// Text input
+const userInput = document.getElementById('userInput');
+userInput.addEventListener('keypress', (e) => {
+  if (e.key === 'Enter') {
+    const text = userInput.value.trim();
+    if (text) {
+      sendWebSocket({
+        type: "text",
+        text: text
+      });
+      userInput.value = '';
+    }
+  }
+});
+
+// Simple gradient animation
+function animate() {
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, width, height);
+  
+  if (isDragging) {
+    ctx.fillStyle = 'rgba(100, 100, 255, 0.5)';
+    ctx.beginPath();
+    ctx.arc(currentPos.x, currentPos.y, 50, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  
+  requestAnimationFrame(animate);
+}
+
+window.addEventListener('resize', resize);
+window.addEventListener('load', () => {
+  resize();
+  animate();
+  connectWebSocket();
+});
+</script>
+</body>
+</html>
