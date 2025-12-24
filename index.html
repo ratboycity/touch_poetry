@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>Surreal Poetry Cascade</title>
+<title>Surreal Poetry Cascade - TouchDesigner</title>
 <style>
   * {
     margin: 0;
@@ -45,23 +45,55 @@
     top: 8px;
     left: 8px;
     font-size: 32px;
-    color: #444;
     z-index: 1000;
     pointer-events: none;
     text-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
   }
 
-  .ws-status {
+  .status.connected { color: #4a4; }
+  .status.disconnected { color: #a44; }
+  .status.connecting { color: #aa4; }
+
+  .connection-ui {
     position: absolute;
-    top: 8px;
-    right: 8px;
+    top: 50px;
+    left: 8px;
+    background: rgba(0, 0, 0, 0.7);
+    padding: 12px;
+    border-radius: 8px;
     font-size: 14px;
-    color: #666;
-    z-index: 1000;
-    pointer-events: none;
-    background: rgba(0,0,0,0.5);
-    padding: 5px 10px;
-    border-radius: 5px;
+    z-index: 1001;
+    max-width: 300px;
+  }
+
+  .connection-ui input {
+    width: 100%;
+    padding: 8px;
+    margin: 5px 0;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid #555;
+    color: #eee;
+    border-radius: 4px;
+    font-family: monospace;
+  }
+
+  .connection-ui button {
+    padding: 8px 16px;
+    background: #4a4;
+    border: none;
+    color: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    margin: 5px 5px 0 0;
+  }
+
+  .connection-ui button:hover {
+    background: #5b5;
+  }
+
+  .connection-ui button:disabled {
+    background: #555;
+    cursor: not-allowed;
   }
 
   .input-form {
@@ -100,184 +132,372 @@
     background-color: rgba(255, 255, 255, 0.15);
     box-shadow: 0 0 15px rgba(100, 100, 255, 0.4);
   }
+
+  #userInput::placeholder {
+    color: #888;
+  }
+
+  .hidden {
+    display: none;
+  }
 </style>
 </head>
 <body>
 <canvas id="canvas"></canvas>
-<div class="status" id="status">●</div>
-<div class="ws-status" id="wsStatus">Disconnected</div>
+<div class="status connecting" id="status">●</div>
+
+<div class="connection-ui" id="connectionUI">
+  <div style="margin-bottom: 8px; font-weight: bold;">TouchDesigner Connection</div>
+  <input type="text" id="wsHost" value="127.0.0.1" placeholder="Host (127.0.0.1)">
+  <input type="number" id="wsPort" value="9980" placeholder="Port (9980)">
+  <button id="connectBtn">Connect</button>
+  <button id="disconnectBtn" disabled>Disconnect</button>
+  <div id="statusText" style="margin-top: 8px; font-size: 12px; color: #aa4;">Not connected</div>
+</div>
+
 <div class="input-form">
-  <input type="text" id="userInput" placeholder="Type words and press Enter..." maxlength="100">
+  <input type="text" id="userInput" placeholder="Type words and press Enter..." maxlength="100" readonly>
 </div>
 
 <script>
-// WebSocket connection
-let ws = null;
-let wsReconnectTimer = null;
-
-// CHANGE THIS TO YOUR LOCAL IP ADDRESS
-const WS_URL = "ws://192.168.1.232:9001"; // or "ws://192.168.x.x:9001"
-
-function connectWebSocket() {
-  try {
-    ws = new WebSocket(WS_URL);
+class TouchDesignerConnection {
+  constructor() {
+    this.ws = null;
+    this.isConnected = false;
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 3;
+    this.reconnectDelay = 2000;
     
-    ws.onopen = () => {
-      console.log("WebSocket connected");
-      document.getElementById("wsStatus").textContent = "Connected";
-      document.getElementById("wsStatus").style.color = "#4a4";
-      clearTimeout(wsReconnectTimer);
-    };
+    this.statusIndicator = document.getElementById('status');
+    this.statusText = document.getElementById('statusText');
+    this.connectBtn = document.getElementById('connectBtn');
+    this.disconnectBtn = document.getElementById('disconnectBtn');
+    this.hostInput = document.getElementById('wsHost');
+    this.portInput = document.getElementById('wsPort');
     
-    ws.onclose = () => {
-      console.log("WebSocket disconnected");
-      document.getElementById("wsStatus").textContent = "Disconnected";
-      document.getElementById("wsStatus").style.color = "#a44";
-      // Attempt reconnect after 2 seconds
-      wsReconnectTimer = setTimeout(connectWebSocket, 2000);
-    };
-    
-    ws.onerror = (error) => {
-      console.error("WebSocket error:", error);
-    };
-    
-    ws.onmessage = (event) => {
-      // Handle messages from TouchDesigner if needed
-      console.log("Received:", event.data);
-    };
-  } catch (error) {
-    console.error("Failed to connect:", error);
-    wsReconnectTimer = setTimeout(connectWebSocket, 2000);
+    this.setupUI();
   }
-}
-
-function sendWebSocket(data) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
+  
+  setupUI() {
+    this.connectBtn.addEventListener('click', () => this.connect());
+    this.disconnectBtn.addEventListener('click', () => this.disconnect());
+    
+    // Try to auto-connect on page load
+    setTimeout(() => this.connect(), 500);
   }
-}
-
-// Canvas visualization (simplified from original)
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-let width, height;
-
-function resize() {
-  width = window.innerWidth;
-  height = window.innerHeight;
-  canvas.width = width;
-  canvas.height = height;
-}
-
-let isDragging = false;
-let currentPos = { x: 0, y: 0 };
-
-function handleStart(x, y) {
-  isDragging = true;
-  currentPos = { x, y };
   
-  const normX = x / width;
-  const normY = y / height;
-  
-  sendWebSocket({
-    type: "touch",
-    touching: true,
-    x: normX,
-    y: normY,
-    rawX: x,
-    rawY: y
-  });
-}
-
-function handleMove(x, y) {
-  if (!isDragging) return;
-  currentPos = { x, y };
-  
-  const normX = x / width;
-  const normY = y / height;
-  
-  sendWebSocket({
-    type: "touch",
-    touching: true,
-    x: normX,
-    y: normY,
-    rawX: x,
-    rawY: y
-  });
-}
-
-function handleEnd() {
-  isDragging = false;
-  
-  sendWebSocket({
-    type: "touch",
-    touching: false,
-    x: currentPos.x / width,
-    y: currentPos.y / height
-  });
-}
-
-// Touch events
-canvas.addEventListener('touchstart', (e) => {
-  e.preventDefault();
-  const touch = e.touches[0];
-  handleStart(touch.clientX, touch.clientY);
-}, { passive: false });
-
-canvas.addEventListener('touchmove', (e) => {
-  e.preventDefault();
-  const touch = e.touches[0];
-  handleMove(touch.clientX, touch.clientY);
-}, { passive: false });
-
-canvas.addEventListener('touchend', (e) => {
-  e.preventDefault();
-  handleEnd();
-}, { passive: false });
-
-// Mouse events
-canvas.addEventListener('mousedown', (e) => handleStart(e.clientX, e.clientY));
-canvas.addEventListener('mousemove', (e) => isDragging && handleMove(e.clientX, e.clientY));
-canvas.addEventListener('mouseup', () => handleEnd());
-canvas.addEventListener('mouseleave', () => handleEnd());
-
-// Text input
-const userInput = document.getElementById('userInput');
-userInput.addEventListener('keypress', (e) => {
-  if (e.key === 'Enter') {
-    const text = userInput.value.trim();
-    if (text) {
-      sendWebSocket({
-        type: "text",
-        text: text
-      });
-      userInput.value = '';
+  connect() {
+    const host = this.hostInput.value || '127.0.0.1';
+    const port = this.portInput.value || '9980';
+    const url = `ws://${host}:${port}`;
+    
+    this.updateStatus('connecting', 'Connecting...');
+    this.connectBtn.disabled = true;
+    
+    try {
+      this.ws = new WebSocket(url);
+      
+      this.ws.onopen = () => {
+        this.isConnected = true;
+        this.reconnectAttempts = 0;
+        this.updateStatus('connected', `Connected to ${host}:${port}`);
+        this.connectBtn.disabled = true;
+        this.disconnectBtn.disabled = false;
+        console.log('WebSocket connected to TouchDesigner');
+      };
+      
+      this.ws.onclose = (event) => {
+        this.isConnected = false;
+        this.connectBtn.disabled = false;
+        this.disconnectBtn.disabled = true;
+        
+        if (event.wasClean) {
+          this.updateStatus('disconnected', 'Disconnected');
+          console.log('WebSocket closed cleanly');
+        } else {
+          this.updateStatus('disconnected', 'Connection lost');
+          console.log('WebSocket connection died');
+          this.attemptReconnect();
+        }
+      };
+      
+      this.ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        this.updateStatus('disconnected', 'Connection error');
+      };
+      
+      this.ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('Received from TouchDesigner:', data);
+          // Handle any messages from TouchDesigner here
+        } catch (e) {
+          console.log('Received (non-JSON):', event.data);
+        }
+      };
+      
+    } catch (error) {
+      console.error('Failed to create WebSocket:', error);
+      this.updateStatus('disconnected', 'Failed to connect');
+      this.connectBtn.disabled = false;
     }
   }
-});
-
-// Simple gradient animation
-function animate() {
-  ctx.fillStyle = '#0a0a0a';
-  ctx.fillRect(0, 0, width, height);
   
-  if (isDragging) {
-    ctx.fillStyle = 'rgba(100, 100, 255, 0.5)';
-    ctx.beginPath();
-    ctx.arc(currentPos.x, currentPos.y, 50, 0, Math.PI * 2);
-    ctx.fill();
+  disconnect() {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.isConnected = false;
+    this.updateStatus('disconnected', 'Disconnected');
+    this.connectBtn.disabled = false;
+    this.disconnectBtn.disabled = true;
   }
   
-  requestAnimationFrame(animate);
+  attemptReconnect() {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      this.updateStatus('connecting', `Reconnecting (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+      
+      setTimeout(() => {
+        console.log(`Reconnect attempt ${this.reconnectAttempts}`);
+        this.connect();
+      }, this.reconnectDelay);
+    } else {
+      this.updateStatus('disconnected', 'Failed to reconnect. Click Connect to retry.');
+    }
+  }
+  
+  updateStatus(state, text) {
+    this.statusIndicator.className = `status ${state}`;
+    this.statusText.textContent = text;
+  }
+  
+  send(data) {
+    if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify(data));
+        return true;
+      } catch (error) {
+        console.error('Failed to send data:', error);
+        return false;
+      }
+    } else {
+      console.warn('WebSocket not connected, cannot send data');
+      return false;
+    }
+  }
 }
 
-window.addEventListener('resize', resize);
+class OptimizedCascade {
+  constructor(canvas, connection) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.connection = connection;
+    this.resize();
+    this.words = [];
+    this.time = 0;
+    this.hueOffset = 0;
+    this.isDragging = false;
+    this.draggedWord = null;
+    this.lastTouch = { x: 0, y: 0 };
+    this.particles = [];
+    this.maxParticles = 40;
+    this.frameCount = 0;
+    this.maxWords = 11;
+    
+    this.initEvents();
+    this.animate();
+  }
+
+  resize() {
+    const dpr = window.devicePixelRatio || 1;
+    this.width = window.innerWidth;
+    this.height = window.innerHeight;
+    this.canvas.width = this.width * dpr;
+    this.canvas.height = this.height * dpr;
+    this.canvas.style.width = this.width + 'px';
+    this.canvas.style.height = this.height + 'px';
+    this.ctx.scale(dpr, dpr);
+    this.centerX = this.width * 0.5;
+    this.centerY = this.height * 0.5;
+  }
+
+  initEvents() {
+    // Touch events
+    this.canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const touch = e.touches[0];
+      this.handleStart(touch.clientX, touch.clientY);
+    }, { passive: false });
+    
+    this.canvas.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      const touch = e.touches[0];
+      this.handleMove(touch.clientX, touch.clientY);
+    }, { passive: false });
+    
+    this.canvas.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      this.handleEnd();
+    }, { passive: false });
+
+    // Mouse events
+    this.canvas.addEventListener('mousedown', (e) => {
+      this.handleStart(e.clientX, e.clientY);
+    });
+    
+    this.canvas.addEventListener('mousemove', (e) => {
+      if (this.isDragging) this.handleMove(e.clientX, e.clientY);
+    });
+    
+    this.canvas.addEventListener('mouseup', () => this.handleEnd());
+    this.canvas.addEventListener('mouseleave', () => this.handleEnd());
+
+    // Text input
+    const userInput = document.getElementById('userInput');
+    userInput.addEventListener('click', () => {
+      userInput.removeAttribute('readonly');
+      userInput.focus();
+    });
+    
+    userInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        const text = userInput.value.trim();
+        if (text) {
+          this.processText(text);
+          this.sendText(text);
+          userInput.value = '';
+          userInput.blur();
+          userInput.setAttribute('readonly', '');
+        }
+      }
+    });
+  }
+
+  handleStart(x, y) {
+    this.isDragging = true;
+    this.lastTouch = { x, y };
+    this.sendTouch(x, y, true);
+  }
+
+  handleMove(x, y) {
+    if (this.isDragging) {
+      this.lastTouch = { x, y };
+      this.sendTouch(x, y, true);
+    }
+  }
+
+  handleEnd() {
+    if (this.isDragging) {
+      this.isDragging = false;
+      this.sendTouch(this.lastTouch.x, this.lastTouch.y, false);
+    }
+  }
+
+  sendTouch(x, y, touching) {
+    // Normalize coordinates to 0-1 range
+    const normX = x / this.width;
+    const normY = y / this.height;
+    
+    this.connection.send({
+      type: 'touch',
+      x: normX,
+      y: normY,
+      touching: touching,
+      rawX: x,
+      rawY: y,
+      width: this.width,
+      height: this.height,
+      timestamp: Date.now()
+    });
+  }
+
+  sendText(text) {
+    this.connection.send({
+      type: 'text',
+      text: text,
+      timestamp: Date.now()
+    });
+  }
+
+  processText(text) {
+    const words = text.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    words.forEach((word, index) => {
+      setTimeout(() => {
+        if (this.words.length >= this.maxWords) {
+          this.words.shift();
+        }
+        this.words.push(this.createWord(word));
+      }, index * 150);
+    });
+  }
+
+  createWord(text) {
+    const angle = Math.random() * Math.PI * 2;
+    const distance = Math.random() * Math.min(this.width, this.height) * 0.3;
+    return {
+      text: text,
+      x: this.centerX + Math.cos(angle) * distance,
+      y: this.centerY + Math.sin(angle) * distance,
+      vx: (Math.random() - 0.5) * 2,
+      vy: (Math.random() - 0.5) * 2,
+      size: 28 + Math.random() * 24,
+      opacity: 0.9,
+      hue: Math.random() * 360,
+      rotation: Math.random() * 360,
+      life: 300
+    };
+  }
+
+  animate() {
+    requestAnimationFrame(() => this.animate());
+    this.time = performance.now();
+    this.frameCount++;
+    
+    // Clear canvas
+    this.ctx.fillStyle = '#0a0a0a';
+    this.ctx.fillRect(0, 0, this.width, this.height);
+    
+    // Update and draw words
+    this.words = this.words.filter(word => {
+      word.x += word.vx;
+      word.y += word.vy;
+      word.vx *= 0.98;
+      word.vy *= 0.98;
+      word.life--;
+      word.opacity = (word.life / 300) * 0.9;
+      
+      // Wrap around edges
+      if (word.x < 0) word.x = this.width;
+      if (word.x > this.width) word.x = 0;
+      if (word.y < 0) word.y = this.height;
+      if (word.y > this.height) word.y = 0;
+      
+      // Draw word
+      this.ctx.save();
+      this.ctx.translate(word.x, word.y);
+      this.ctx.globalAlpha = word.opacity;
+      this.ctx.fillStyle = `hsl(${word.hue}, 70%, 60%)`;
+      this.ctx.font = `bold ${word.size}px 'Inter', monospace`;
+      this.ctx.textAlign = 'center';
+      this.ctx.textBaseline = 'middle';
+      this.ctx.fillText(word.text, 0, 0);
+      this.ctx.restore();
+      
+      return word.life > 0;
+    });
+  }
+}
+
+// Initialize when page loads
 window.addEventListener('load', () => {
-  resize();
-  animate();
-  connectWebSocket();
+  const canvas = document.getElementById('canvas');
+  const connection = new TouchDesignerConnection();
+  const cascade = new OptimizedCascade(canvas, connection);
+  
+  window.addEventListener('resize', () => cascade.resize());
 });
 </script>
 </body>
-
 </html>
